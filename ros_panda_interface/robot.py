@@ -1,13 +1,14 @@
 import numpy as np
-from gripper import Gripper
-from arm import Arm
+from ros_panda_interface.arm import Arm
+from ros_panda_interface.gripper import Gripper
+
 try:
     import rospy
     from franka_msgs.msg import FrankaState
     from franka_control.srv import SetForceTorqueCollisionBehavior, SetForceTorqueCollisionBehaviorRequest
     from ros_panda_controller.msg import RobotModel
-    from pyquaternion import Quaternion
     from ros_panda_controller.msg import AgentActions
+    from pyquaternion import Quaternion
     ready_for_real_world = True
     missing_module = None
 except ImportError as e:
@@ -17,7 +18,7 @@ except ImportError as e:
 
 class Robot:
 
-    def __init__(self, home_gripper):
+    def __init__(self, home_gripper, width=0.05):
 
         # check if everything is ready for real-world training
         if not ready_for_real_world:
@@ -41,6 +42,9 @@ class Robot:
         self._model_sub = rospy.Subscriber('/robot_model_publisher', RobotModel,
                                            self._robot_model_callback, queue_size=1, tcp_nodelay=True)
         self.J = []
+
+        # set the width of the object to grasp
+        self.width = width
 
         # frequency for control
         self.freq = 20  # Hz
@@ -182,7 +186,7 @@ class Robot:
         return self._gripper.gripper_open
 
     # -------------- Actions --------------
-    def send_action(self, action, width, disable_gripper=False):
+    def send_action(self, action, disable_gripper=False):
         """
         Publishes arm actions and calls the gripper action server.
 
@@ -191,8 +195,6 @@ class Robot:
         action : np.array
             8-dim array, where action[0:7] are arm actions (desired angular joint velocities [rad/s] for the 7 joints),
             and action[7] is the gripper action (0 -> close gripper; 1 -> open gripper)
-        width : float
-            Width of the object to grasp. Needed to check whether the grasp was successful or not.
         disable_gripper : bool
             If true, no gripper actions are executed.
 
@@ -217,7 +219,7 @@ class Robot:
         # --- gripper actions ---
         if not disable_gripper:
             if action[7] < 0.5 and self._gripper.gripper_open:
-                self._gripper.grasp(width, wait=True)
+                self._gripper.grasp(self.width, wait=True)
             elif action[7] >= 0.5 and not self._gripper.gripper_open:
                 self._gripper.open()
 
@@ -245,7 +247,7 @@ class Robot:
         # setup ros timer
         rate = rospy.Rate(self.freq)
         for vels in next_vels:
-            self.send_action(vels, 0, True)
+            self.send_action(vels, True)
             rate.sleep()
 
     def move_to_home(self):
@@ -265,7 +267,7 @@ class Robot:
             for i in range(80):
                 vels = np.array([0.0]*7)
                 vels -= self.resolve_redundancy_joint_velocities(self.ref_pos_reorient, alpha=1.0)
-                self.send_action(vels, 0, True)
+                self.send_action(vels, True)
                 rate.sleep()
 
         # move to reference position -> PD controller
@@ -273,7 +275,7 @@ class Robot:
         Kd = 0.4
         e_prev = e
         t_prev = -100
-        while np.max(np.abs(e)) > 0.1:
+        while np.max(np.abs(e)) > 0.05:
             e = self.home_pos - self._arm.get_joint_positions()
             P = Kp * e
             t = rospy.rostime.get_rostime()
@@ -282,7 +284,7 @@ class Robot:
             t_prev = t.nsecs
             rate.sleep()
             vels = P+D
-            self.send_action(vels, 0, True)
+            self.send_action(vels, True)
 
         # stop if not fully stopped yet
         self.stop()
